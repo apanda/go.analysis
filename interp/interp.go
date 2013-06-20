@@ -182,27 +182,34 @@ func hashInstr (fr *frame, instr ssa.Instruction) uint64 {
 // visitInstr interprets a single ssa.Instruction within the activation
 // record frame.  It returns a continuation value indicating where to
 // read the next instruction from.
-func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction) continuation {
+func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction, trace bool) continuation {
     h := hashInstr(fr, instr)
 	switch instr := instr.(type) {
 	case *ssa.UnOp:
 		fr.env[instr] = unop(instr, fr.get(instr.X))
-        fmt.Fprintf(i.writer, "\t\t<<%v[%v] = %v(%v) [%v]>>\n", &fr.env, h, instr.Op, fr.String(instr.X), fr.env[instr])
+        if trace {
+            fmt.Fprintf(i.writer, "<<%v[%v] = %v(%v) [%v]>>\n", &fr.env, h, instr.Op, fr.String(instr.X), fr.env[instr])
+        }
 
 	case *ssa.BinOp:
 		fr.env[instr] = binop(instr.Op, fr.get(instr.X), fr.get(instr.Y))
-        fmt.Fprintf(i.writer, "\t\t<<%v[%v] = %v %v %v [%v]>>\n",
-                    &fr.env, h, fr.String(instr.X), instr.Op, fr.String(instr.Y), fr.env[instr])
-
+        if trace {
+            fmt.Fprintf(i.writer, "<<%v[%v] = %v %v %v [%v]>>\n",
+                        &fr.env, h, fr.String(instr.X), instr.Op, fr.String(instr.Y), fr.env[instr])
+        }
 	case *ssa.Call:
-        fmt.Fprintf(i.writer, "\t\tenter %v\n", fr.String(instr.Call.Func))
+        if trace {
+            fmt.Fprintf(i.writer, "enter %v\n", fr.String(instr.Call.Func))
+        }
 		fn, args, argSrc := prepareCall(fr, &instr.Call)
         //Enter
         // Determine arguments
         var rets []string
-        fr.env[instr], rets = call(fr.i, fr, instr.Pos(), fn, args, argSrc)
+        fr.env[instr], rets = call(fr.i, fr, instr.Pos(), fn, args, argSrc, trace)
         //Exit
-        fmt.Fprintf(i.writer, "\t\t<<%v[%v] = %v [%v]>>\n", &fr.env, h, rets, fr.env[instr])
+        if trace {
+            fmt.Fprintf(i.writer, "<<%v[%v] = %v [%v]>>\n", &fr.env, h, rets, fr.env[instr])
+        }
 
 	case *ssa.ChangeInterface:
 		x := fr.get(instr.X)
@@ -210,27 +217,38 @@ func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction) continuation {
 			panic(fmt.Sprintf("interface conversion: interface is nil, not %s", instr.Type()))
 		}
 		fr.env[instr] = x
-        fmt.Fprintf(i.writer, "\t\t<<%v[%v] = %v [%v]>>\n", &fr.env, h, instr, fr.env[instr])
-
+        if trace {
+            fmt.Fprintf(i.writer, "<<%v[%v] = %v [%v]>>\n", &fr.env, h, instr, fr.env[instr])
+        } 
 	case *ssa.ChangeType:
 		fr.env[instr] = fr.get(instr.X) // (can't fail)
-        fmt.Fprintf(i.writer, "\t\t<<%v[%v] = %v [%v]>>\n", &fr.env, h, instr, fr.env[instr])
+        if trace {
+            fmt.Fprintf(i.writer, "<<%v[%v] = %v [%v]>>\n", &fr.env, h, instr, fr.env[instr])
+        }
 
 	case *ssa.Convert:
 		fr.env[instr] = conv(instr.Type(), instr.X.Type(), fr.get(instr.X))
-        fmt.Fprintf(i.writer, "\t\t<<%v[%v] = %v [%v]>>\n", &fr.env, h, instr, fr.env[instr])
+        if trace {
+            fmt.Fprintf(i.writer, "<<%v[%v] = %v [%v]>>\n", &fr.env, h, instr, fr.env[instr])
+        }
 
 	case *ssa.MakeInterface:
 		fr.env[instr] = iface{t: instr.X.Type(), v: fr.get(instr.X)}
-        fmt.Fprintf(i.writer, "\t\t<<%v[%v] = %v [%v]>>\n", &fr.env, h, fr.String(instr.X), fr.env[instr])
+        if trace {
+            fmt.Fprintf(i.writer, "<<%v[%v] = %v [%v]>>\n", &fr.env, h, fr.String(instr.X), fr.env[instr])
+        }
 
 	case *ssa.Extract:
 		fr.env[instr] = fr.get(instr.Tuple).(tuple)[instr.Index]
-        fmt.Fprintf(i.writer, "\t\t<<%v[%v] = %v[%v] [%v]>>\n", &fr.env, h, fr.String(instr.Tuple), instr.Index, fr.env[instr])
+        if trace {
+            fmt.Fprintf(i.writer, "<<%v[%v] = %v[%v] [%v]>>\n", &fr.env, h, fr.String(instr.Tuple), instr.Index, fr.env[instr])
+        }
 
 	case *ssa.Slice:
 		fr.env[instr] = slice(fr.get(instr.X), fr.get(instr.Low), fr.get(instr.High))
-        fmt.Fprintf(i.writer, "\t\t<<%v[%v] = %v [%v]>>\n", &fr.env, h, instr, fr.env[instr])
+        if trace {
+            fmt.Fprintf(i.writer, "<<%v[%v] = %v [%v]>>\n", &fr.env, h, instr, fr.env[instr])
+        }
 
 	case *ssa.Ret:
         // Deal with this
@@ -257,10 +275,14 @@ func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction) continuation {
 
 	case *ssa.Send:
 		fr.get(instr.Chan).(chan value) <- copyVal(fr.get(instr.X))
-        fmt.Fprintf(i.writer, "\t\t<<%v <- %v>>\n", fr.String(instr.Chan), fr.String(instr.X))
+        if trace {
+            fmt.Fprintf(i.writer, "<<%v <- %v>>\n", fr.String(instr.Chan), fr.String(instr.X))
+        }
 
 	case *ssa.Store:
-        fmt.Fprintf (i.writer, "\t\t<<*%v = %v [%v]>>\n", fr.String(instr.Addr), fr.String(instr.Val), fr.get(instr.Val)) 
+        if trace {
+            fmt.Fprintf (i.writer, "<<*%v = %v [%v]>>\n", fr.String(instr.Addr), fr.String(instr.Val), fr.get(instr.Val)) 
+        }
 		*fr.get(instr.Addr).(*value) = copyVal(fr.get(instr.Val))
 
 	case *ssa.If:
@@ -268,8 +290,10 @@ func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction) continuation {
 		if fr.get(instr.Cond).(bool) {
 			succ = 0
 		}
-        fmt.Fprintf (i.writer, "\t\t<<if %v then %v else %v [%v %v]>>\n", fr.String(instr.Cond), 
-            fr.block.Succs[0], fr.block.Succs[1],  fr.get(instr.Cond).(bool), fr.block.Succs[succ])
+        if trace {
+            fmt.Fprintf (i.writer, "<<if %v then %v else %v [%v %v]>>\n", fr.String(instr.Cond), 
+                fr.block.Succs[0], fr.block.Succs[1],  fr.get(instr.Cond).(bool), fr.block.Succs[succ])
+        }
 		fr.prevBlock, fr.block = fr.block, fr.block.Succs[succ]
 		return kJump
 
@@ -280,18 +304,20 @@ func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction) continuation {
 	case *ssa.Defer:
 		pos := instr.Pos() // TODO(gri): workaround for go/types bug in typeswitch+funclit.
 		fn, args, argSrc := prepareCall(fr, &instr.Call)
-		fr.defers = append(fr.defers, func() { call(fr.i, fr, pos, fn, args, argSrc) })
+		fr.defers = append(fr.defers, func() { call(fr.i, fr, pos, fn, args, argSrc, trace) })
 
 	case *ssa.Go:
         go func() {
-            fmt.Fprintf(i.writer, "\t\tgo routine enter %v\n", fr.String(instr.Call.Func))
+            fmt.Fprintf(i.writer, "go routine enter %v\n", fr.String(instr.Call.Func))
             fn, args, argSrc := prepareCall(fr, &instr.Call)
-            call(fr.i, nil, instr.Pos(), fn, args, argSrc)
+            call(fr.i, nil, instr.Pos(), fn, args, argSrc, true)
         } ()
 
 	case *ssa.MakeChan:
 		fr.env[instr] = make(chan value, asInt(fr.get(instr.Size)))
-        fmt.Printf("\t\t<<%v[%v] = %v %v>>\n", &fr.env, h, "make chan", instr.Type())
+        if trace {
+            fmt.Printf("<<%v[%v] = %v %v>>\n", &fr.env, h, "make chan", instr.Type())
+        }
 
 	case *ssa.Alloc:
 		var addr *value
@@ -299,7 +325,9 @@ func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction) continuation {
 			// new
 			addr = new(value)
 			fr.env[instr] = addr
-            fmt.Fprintf(i.writer, "\t\t<<%v[%v] = heapalloc(%v) [%v]>>\n", &fr.env, h, instr.Type(),fr.env[instr])
+            if trace {
+                fmt.Fprintf(i.writer, "<<%v[%v] = heapalloc(%v) [%v]>>\n", &fr.env, h, instr.Type(),fr.env[instr])
+            }
 		} else {
 			// local
 			addr = fr.env[instr].(*value)
@@ -313,7 +341,9 @@ func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction) continuation {
 			slice[i] = zero(tElt)
 		}
 		fr.env[instr] = slice[:asInt(fr.get(instr.Len))]
-        fmt.Fprintf (i.writer, "\t\t[%v]\n", instr)
+        if trace {
+            fmt.Fprintf (i.writer, "[%v]\n", instr)
+        } 
 
 	case *ssa.MakeMap:
 		reserve := 0
@@ -321,26 +351,36 @@ func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction) continuation {
 			reserve = asInt(fr.get(instr.Reserve))
 		}
 		fr.env[instr] = makeMap(instr.Type().Underlying().(*types.Map).Key(), reserve)
-        fmt.Fprintf (i.writer, "\t\t<<%v[%v] = makeMap>>\n", &fr.env, h)
+        if trace {
+            fmt.Fprintf (i.writer, "<<%v[%v] = makeMap>>\n", &fr.env, h)
+        }
 
 	case *ssa.Range:
 		fr.env[instr] = rangeIter(fr.get(instr.X), instr.X.Type())
-        fmt.Fprintf (i.writer, "\t\t<<%v[%v] = %v>>\n", &fr.env, &instr, instr)
+        if trace {
+            fmt.Fprintf (i.writer, "<<%v[%v] = %v>>\n", &fr.env, &instr, instr)
+        }
 
 	case *ssa.Next:
 		fr.env[instr] = fr.get(instr.Iter).(iter).next()
-        fmt.Fprintf (i.writer, "\t\t<<%v[v] = %v>>\n", &fr.env, &instr, instr)
+        if trace {
+            fmt.Fprintf (i.writer, "<<%v[v] = %v>>\n", &fr.env, &instr, instr)
+        }
 
 	case *ssa.FieldAddr:
 		x := fr.get(instr.X)
 		fr.env[instr] = &(*x.(*value)).(structure)[instr.Field]
         name := instr.X.Type().Deref().Underlying().(*types.Struct).Field(instr.Field).Name()
-        fmt.Fprintf(i.writer, "\t\t<<%v[%v] = &%v.%v>>\n", &fr.env, h, fr.String(instr.X), name)
+        if trace {
+            fmt.Fprintf(i.writer, "<<%v[%v] = &%v.%v>>\n", &fr.env, h, fr.String(instr.X), name)
+        }
 
 	case *ssa.Field:
 		fr.env[instr] = copyVal(fr.get(instr.X).(structure)[instr.Field])
         name := instr.X.Type().Deref().Underlying().(*types.Struct).Field(instr.Field).Name()
-        fmt.Fprintf(i.writer, "\t\t<<%v[%v] = %v.%v>>\n", &fr.env, h, fr.String(instr.X), name)
+        if trace {
+            fmt.Fprintf(i.writer, "<<%v[%v] = %v.%v>>\n", &fr.env, h, fr.String(instr.X), name)
+        }
 
 	case *ssa.IndexAddr:
 		x := fr.get(instr.X)
@@ -348,21 +388,29 @@ func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction) continuation {
 		switch x := x.(type) {
 		case []value:
 			fr.env[instr] = &x[asInt(idx)]
-            fmt.Fprintf(i.writer, "\t\t<<%v[%v] = &%v[%v]>>\n", &fr.env, h, fr.String(instr.X), instr.Index)
+            if trace {
+                fmt.Fprintf(i.writer, "<<%v[%v] = &%v[%v]>>\n", &fr.env, h, fr.String(instr.X), instr.Index)
+            }
 		case *value: // *array
 			fr.env[instr] = &(*x).(array)[asInt(idx)]
-            fmt.Fprintf(i.writer, "\t\t<<%v[%v] = &%v[%v]>>\n", &fr.env, h, fr.String(instr.X), instr.Index)
+            if trace {
+                fmt.Fprintf(i.writer, "<<%v[%v] = &%v[%v]>>\n", &fr.env, h, fr.String(instr.X), instr.Index)
+            }
 		default:
 			panic(fmt.Sprintf("unexpected x type in IndexAddr: %T", x))
 		}
 
 	case *ssa.Index:
 		fr.env[instr] = copyVal(fr.get(instr.X).(array)[asInt(fr.get(instr.Index))])
-        fmt.Fprintf(i.writer, "\t\t<<%v[%v] = %v[%v]>>\n", &fr.env, h, fr.String(instr.X), instr.Index)
+        if trace {
+            fmt.Fprintf(i.writer, "<<%v[%v] = %v[%v]>>\n", &fr.env, h, fr.String(instr.X), instr.Index)
+        }
 
 	case *ssa.Lookup:
 		fr.env[instr] = lookup(instr, fr.get(instr.X), fr.get(instr.Index))
-        fmt.Fprintf(i.writer, "\t\t<<%v[%v] = %v[%v] [%v]>>\n", &fr.env, h, fr.String(instr.X), fr.String(instr.Index), fr.env[instr])
+        if trace {
+            fmt.Fprintf(i.writer, "<<%v[%v] = %v[%v] [%v]>>\n", &fr.env, h, fr.String(instr.X), fr.String(instr.Index), fr.env[instr])
+        }
 
 	case *ssa.MapUpdate:
 		m := fr.get(instr.Map)
@@ -376,7 +424,9 @@ func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction) continuation {
 		default:
 			panic(fmt.Sprintf("illegal map type: %T", m))
 		}
-        fmt.Fprintf (i.writer, "\t\t<<%v[%v] = %v [%v]>>\n", fr.String(instr.Map), key, fr.String(instr.Value), v)
+        if trace {
+            fmt.Fprintf (i.writer, "<<%v[%v] = %v [%v]>>\n", fr.String(instr.Map), key, fr.String(instr.Value), v)
+        }
 
 	case *ssa.TypeAssert:
 		fr.env[instr] = typeAssert(fr.i, instr, fr.get(instr.X).(iface))
@@ -483,15 +533,15 @@ func prepareCall(fr *frame, call *ssa.CallCommon) (fn value, args []value, argSr
 // fn with arguments args, returning its result.
 // callpos is the position of the callsite.
 //
-func call(i *interpreter, caller *frame, callpos token.Pos, fn value, args []value, argSrc []string) (value, []string) {
+func call(i *interpreter, caller *frame, callpos token.Pos, fn value, args []value, argSrc []string, trace bool) (value, []string) {
 	switch fn := fn.(type) {
 	case *ssa.Function:
 		if fn == nil {
 			panic("call of nil function") // nil of func type
 		}
-        return callSSA(i, caller, callpos, fn, args, nil, argSrc, nil)
+        return callSSA(i, caller, callpos, fn, args, nil, argSrc, nil, trace)
 	case *closure:
-        return  callSSA(i, caller, callpos, fn.Fn, args, fn.Env, argSrc, fn.EnvSrc)
+        return  callSSA(i, caller, callpos, fn.Fn, args, fn.Env, argSrc, fn.EnvSrc, trace)
 	case *ssa.Builtin:
         return callBuiltin(caller, callpos, fn, args, argSrc)
 	}
@@ -509,7 +559,7 @@ func loc(fset *token.FileSet, pos token.Pos) string {
 // and lexical environment env, returning its result.
 // callpos is the position of the callsite.
 //
-func callSSA(i *interpreter, caller *frame, callpos token.Pos, fn *ssa.Function, args []value, env []value, argSrc []string, envSrc []string) (value, []string) {
+func callSSA(i *interpreter, caller *frame, callpos token.Pos, fn *ssa.Function, args []value, env []value, argSrc []string, envSrc []string, trace bool) (value, []string) {
 	if i.mode&EnableTracing != 0 {
 		fset := fn.Prog.Files
 		// TODO(adonovan): fix: loc() lies for external functions.
@@ -544,15 +594,15 @@ func callSSA(i *interpreter, caller *frame, callpos token.Pos, fn *ssa.Function,
 	for j, l := range fn.Locals {
 		fr.locals[j] = zero(l.Type().Deref())
 		fr.env[l] = &fr.locals[j]
-        fmt.Fprintf(i.writer, "\t\t<<%v[%v] = %v>>\n", &fr.env, l, fr.locals[j])
+        fmt.Fprintf(i.writer, "<<%v[%v] = %v>>\n", &fr.env, l, fr.locals[j])
 	}
 	for j, p := range fn.Params {
-        fmt.Fprintf(i.writer, "\t\t<<%v[%v] = %v [%v]>>\n", &fr.env, p, argSrc[j], args[j])
+        fmt.Fprintf(i.writer, "<<%v[%v] = %v [%v]>>\n", &fr.env, p, argSrc[j], args[j])
 		fr.env[p] = args[j]
 	}
 	for j, fv := range fn.FreeVars {
 		fr.env[fv] = env[j]
-        fmt.Fprintf(i.writer, "\t\t<<%v[%v] = %v>>\n", &fr.env, fv, env[j])
+        fmt.Fprintf(i.writer, "<<%v[%v] = %v>>\n", &fr.env, fv, env[j])
 	}
 	var instr ssa.Instruction
 
@@ -586,7 +636,7 @@ func callSSA(i *interpreter, caller *frame, callpos token.Pos, fn *ssa.Function,
 					fmt.Fprintln(i.writer, "\t", instr)
 				}
 			}
-			switch visitInstr(i, fr, instr) {
+			switch visitInstr(i, fr, instr, trace) {
 			case kReturn:
 				fr.status = stComplete
 				return fr.result, fr.resultSource
@@ -690,9 +740,9 @@ func Interpret(mainpkg *ssa.Package, mode Mode, filename string, args []string) 
 	}()
 
 	// Run!
-	call(i, nil, token.NoPos, mainpkg.Init, nil, nil)
+	call(i, nil, token.NoPos, mainpkg.Init, nil, nil, false)
 	if mainFn := mainpkg.Func("main"); mainFn != nil {
-		call(i, nil, token.NoPos, mainFn, nil, nil)
+		call(i, nil, token.NoPos, mainFn, nil, nil, false)
 		exitCode = 0
 	} else {
 		fmt.Fprintln(i.writer, "No main function.")
