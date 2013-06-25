@@ -51,6 +51,7 @@ import (
 	"reflect"
 	"runtime"
     "sync"
+    "strings"
 	"code.google.com/p/go.tools/go/types"
 	"code.google.com/p/go.tools/ssa"
 )
@@ -180,30 +181,56 @@ func hashInstr (fr *frame, instr ssa.Instruction) uint64 {
    return fr.labels[instr]
 }
 
-func recv(instr *ssa.UnOp, x value) value {
-    //v := zero(instr.X.Type().Underlying().(*types.Chan).Elem())
-    var v2 value
-    switch instr.X.Type().Underlying().(*types.Chan).Elem().(type) {
-        case *types.Pointer:
-            v := new(value)
-            *v = zero(instr.X.Type().Underlying().(*types.Chan).Elem().Deref())
-            v2 = v
-        default:
-            v2 = zero(instr.X.Type().Underlying().(*types.Chan).Elem())
-    } 
-    if instr.CommaOk {
-        v2 = tuple{v2, true}
+// recvTraditional implements the original channel receive functionality from unop
+// in ops.go. This function essentially does a real channel receive (the interpreter represents
+// channels as real Go objects).
+func recvTraditional(instr *ssa.UnOp, x value) value {
+    v, ok := <-x.(chan value)
+    if !ok {
+        v = zero(instr.X.Type().Underlying().(*types.Chan).Elem())
     }
-    //fmt.Printf("%v %v\n", v, reflect.TypeOf(v))
-    //*v = zero(instr.Type().Deref())
-	/*v, ok := <-x.(chan value)
-	if !ok {
-		v = zero(instr.X.Type().Underlying().(*types.Chan).Elem())
-	}
-	if instr.CommaOk {
-		v = tuple{v, ok}
-	}*/
-	return v2
+    if instr.CommaOk {
+        v = tuple{v, ok}
+    }
+    return v 
+}
+
+// recv is called by unop for channel receives. recv (currently) interposes to check if the channel is attempting to receive
+// a packet or some other type, and injects packets into the stream.
+// TODO: Better packet generation
+func recv(instr *ssa.UnOp, x value) value {
+    if (strings.HasSuffix(instr.X.Type().Underlying().(*types.Chan).Elem().String(), "github.com/apanda/learn.Packet")) {
+        var v2 value
+        switch instr.X.Type().Underlying().(*types.Chan).Elem().(type) {
+            case *types.Pointer:
+                v := new(value)
+                *v = zero(instr.X.Type().Underlying().(*types.Chan).Elem().Deref())
+                v2 = v
+            default:
+                v2 = zero(instr.X.Type().Underlying().(*types.Chan).Elem())
+        } 
+        if instr.CommaOk {
+            v2 = tuple{v2, true}
+        }
+        return v2
+    } else {
+        return recvTraditional(instr, x)
+    }
+}
+
+//sendTraditional implements the send functionality original implemented by visitInstr
+func sendTraditional(fr *frame, instr *ssa.Send) {
+    fr.get(instr.Chan).(chan value) <- copyVal(fr.get(instr.X))
+}
+
+// send is called by visitInstr to send a message. Here we make sure that if this happens to be a rule
+// the interpreter just consumes it. Perhaps we should print out the rule or something else.
+func send(fr *frame, instr *ssa.Send) {
+    if (strings.HasSuffix(instr.Chan.Type().Underlying().(*types.Chan).Elem().String(), "github.com/apanda/learn.Rule")) {
+        // NOP, we already saw the construction of this rule
+    } else {
+        sendTraditional (fr, instr)
+    }
 }
 
 // visitInstr interprets a single ssa.Instruction within the activation
@@ -301,7 +328,7 @@ func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction, trace bool) co
 		panic(targetPanic{fr.get(instr.X)})
 
 	case *ssa.Send:
-		fr.get(instr.Chan).(chan value) <- copyVal(fr.get(instr.X))
+        send(fr, instr)
         if trace {
             fmt.Fprintf(i.writer, "<<%v <- %v>>\n", fr.String(instr.Chan), fr.String(instr.X))
         }
