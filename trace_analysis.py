@@ -23,7 +23,9 @@ def main(args):
     pm = {}
     t  = {}
     def rlookup(lookup, varname):
+        #print "Entering rlookup with %s %s"%(lookup, varname)
         rprint = ''
+        should_print = True
         if lookup.startswith('&'):
             match = re.match(ADDR_PATTERN, lookup)
             varnameR = match.group(1)
@@ -31,6 +33,7 @@ def main(args):
             varnameR = lookup_var(varnameR)
             pm[varname] = '%s%s'%(varnameR, rest)
             rprint = '&%s'%pm[varname]
+            should_print = False
         elif lookup.startswith('*'):
             match = re.match(PTR_PATTERN, lookup)
             varnameR = match.group(1)
@@ -41,6 +44,8 @@ def main(args):
                 rprint = "%s%s"%(varnameR, rest)
             else:
                 rprint = "*%s%s"%(varnameR, rest)
+            vm[varname] = varnameR
+            should_print = False
         elif lookup.startswith('0x'):
             match = re.match(VAR_PATTERN, lookup)
             varnameR = match.group(1)
@@ -48,13 +53,14 @@ def main(args):
             rprint = '%s%s'%(lookup_var(varnameR), rest)
         elif lookup.startswith('<-'):
             match = re.match(CHAN_RECV_PATTERN, lookup)
-            varnameR = rlookup(match.group(1), None)
+            varnameR, sp = rlookup(match.group(1), None)
             rest = match.group(2)
             rprint = '<-%s%s'%(varnameR, rest)
         else:
-            rprint = parts[1]
-        return rprint
+            rprint = lookup
+        return rprint, should_print
     def llookup(lookup):
+        #print "Entering llookup with %s"%(lookup)
         lprint = ''
         if lookup.startswith('*'):
             varname = lookup[1:]
@@ -73,23 +79,36 @@ def main(args):
             lprint = varname
         return lprint
     def lookup_var(lookup):
+        #print "Entering lookup_var with %s"%(lookup)
         match = re.match(VAR_INTERNAL_PATTERN, lookup)
         l = match.group(1)
         s = match.group(2)
-        if lookup in t:
+        #print "|l:%s s:%s|  "%(l, s)
+        if l in t:
             varname = t[l]
         else:
-            varname = v.next()
+            if 'github.com/apanda/learn.inp' in l:
+                varname = 'inp'
+            elif 'github.com/apanda/learn.out' in l: 
+                varname = 'out'
+            elif 'github.com/apanda/learn.broadcast' in l:
+                varname = 'broadcast'
+            else:
+                varname = v.next()
             t[l] = varname
+        if varname in vm:
+            varname = vm[varname]
         if s.startswith('['):
             s = s.strip()[1:-1]
-            translate = rlookup(s, None)
+            translate, sp = rlookup(s, None)
+            #print "//translate:%s//"%(translate)
             return '%s[%s]'%(varname, translate)
         else:
             return '%s%s'%(varname, s)
     for l in f:
         if l.startswith('<<'): #ignore non '<<' lines
             l = l.strip()[2:-2]
+            #print '%s\t'%(l),
             if l.startswith('if'): #figure out how to process
                 match = re.match(IF_PATTERN, l)
                 clause = match.group(1)
@@ -101,13 +120,13 @@ def main(args):
             elif '=' in l:
                 parts = map(str.strip, list(re.match(OVERALL_PATTERN, l).groups()))
                 lprint = llookup(parts[0])
-                rprint = rlookup(parts[1], lprint)
-
-                print "%s = %s"%(lprint, rprint)
+                rprint, sp = rlookup(parts[1], lprint)
+                if sp:# or True:
+                    print "%s = %s"%(lprint, rprint)
             elif '<-' in l:
                 parts = map(str.strip, list(re.match(CHAN_SEND_PATTERN, l).groups()))
                 lprint = llookup(parts[0])
-                rprint = rlookup(parts[1], None)
+                rprint, sp = rlookup(parts[1], None)
                 print "%s <- %s"%(lprint, rprint)
             else:
                 print "%s %s"%(l, "Not found")

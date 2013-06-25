@@ -756,14 +756,8 @@ func binop(op token.Token, x, y value) value {
 func unop(instr *ssa.UnOp, x value) value {
 	switch instr.Op {
 	case token.ARROW: // receive
-		v, ok := <-x.(chan value)
-		if !ok {
-			v = zero(instr.X.Type().Underlying().(*types.Chan).Elem())
-		}
-		if instr.CommaOk {
-			v = tuple{v, ok}
-		}
-		return v
+        z := recv(instr, x)
+		return z
 	case token.SUB:
 		switch x := x.(type) {
 		case int:

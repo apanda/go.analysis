@@ -50,7 +50,7 @@ import (
 	"os"
 	"reflect"
 	"runtime"
-
+    "sync"
 	"code.google.com/p/go.tools/go/types"
 	"code.google.com/p/go.tools/ssa"
 )
@@ -88,6 +88,7 @@ type interpreter struct {
 	errorMethods   ssa.MethodSet        // the method set of reflect.error, which implements the error interface.
 	rtypeMethods   ssa.MethodSet        // the method set of rtype, which implements the reflect.Type interface.
     writer         *os.File
+    wg             sync.WaitGroup
 }
 
 type frame struct {
@@ -177,6 +178,32 @@ func hashInstr (fr *frame, instr ssa.Instruction) uint64 {
         fr.labels[instr] = fr.instrCount
     }
    return fr.labels[instr]
+}
+
+func recv(instr *ssa.UnOp, x value) value {
+    //v := zero(instr.X.Type().Underlying().(*types.Chan).Elem())
+    var v2 value
+    switch instr.X.Type().Underlying().(*types.Chan).Elem().(type) {
+        case *types.Pointer:
+            v := new(value)
+            *v = zero(instr.X.Type().Underlying().(*types.Chan).Elem().Deref())
+            v2 = v
+        default:
+            v2 = zero(instr.X.Type().Underlying().(*types.Chan).Elem())
+    } 
+    if instr.CommaOk {
+        v2 = tuple{v2, true}
+    }
+    //fmt.Printf("%v %v\n", v, reflect.TypeOf(v))
+    //*v = zero(instr.Type().Deref())
+	/*v, ok := <-x.(chan value)
+	if !ok {
+		v = zero(instr.X.Type().Underlying().(*types.Chan).Elem())
+	}
+	if instr.CommaOk {
+		v = tuple{v, ok}
+	}*/
+	return v2
 }
 
 // visitInstr interprets a single ssa.Instruction within the activation
@@ -307,10 +334,12 @@ func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction, trace bool) co
 		fr.defers = append(fr.defers, func() { call(fr.i, fr, pos, fn, args, argSrc, trace) })
 
 	case *ssa.Go:
+        i.wg.Add(1)
         go func() {
             fmt.Fprintf(i.writer, "go routine enter %v\n", fr.String(instr.Call.Func))
             fn, args, argSrc := prepareCall(fr, &instr.Call)
             call(fr.i, nil, instr.Pos(), fn, args, argSrc, true)
+            i.wg.Done()
         } ()
 
 	case *ssa.MakeChan:
@@ -425,7 +454,7 @@ func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction, trace bool) co
 			panic(fmt.Sprintf("illegal map type: %T", m))
 		}
         if trace {
-            fmt.Fprintf (i.writer, "<<%v[%v] = %v [%v]>>\n", fr.String(instr.Map), key, fr.String(instr.Value), v)
+            fmt.Fprintf (i.writer, "<<%v[%v] = %v [%v]>>\n", fr.String(instr.Map), fr.String(instr.Key), fr.String(instr.Value), v)
         }
 
 	case *ssa.TypeAssert:
@@ -743,6 +772,7 @@ func Interpret(mainpkg *ssa.Package, mode Mode, filename string, args []string) 
 	call(i, nil, token.NoPos, mainpkg.Init, nil, nil, false)
 	if mainFn := mainpkg.Func("main"); mainFn != nil {
 		call(i, nil, token.NoPos, mainFn, nil, nil, false)
+        i.wg.Wait()
 		exitCode = 0
 	} else {
 		fmt.Fprintln(i.writer, "No main function.")
