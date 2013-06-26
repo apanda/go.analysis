@@ -52,6 +52,7 @@ import (
 	"runtime"
     "sync"
     "strings"
+    "sync/atomic"
 	"code.google.com/p/go.tools/go/types"
 	"code.google.com/p/go.tools/ssa"
 )
@@ -90,6 +91,10 @@ type interpreter struct {
 	rtypeMethods   ssa.MethodSet        // the method set of rtype, which implements the reflect.Type interface.
     writer         *os.File
     wg             sync.WaitGroup
+    gprefix        string
+    fcount         uint64
+    gcount         uint64
+    gvars          map[ssa.Value] string
 }
 
 type frame struct {
@@ -107,6 +112,9 @@ type frame struct {
     instrCount       uint64
     labels           map[ssa.Instruction] uint64
     packetType       string
+    fprefix          string
+    fvars            map[ssa.Value] string
+    fcount           uint64
 }
 
 func (fr *frame) get(key ssa.Value) value {
@@ -137,17 +145,27 @@ func (fr *frame) String(key ssa.Value) string {
 		// such as ssa.Slice.{Low,High}.
 		return ""
 	case *ssa.Function, *ssa.Builtin:
-		return fmt.Sprintf("%v[%v]", &fr.env, key)
+        return fmt.Sprintf("%v", key)
 	case *ssa.Literal:
 		return fmt.Sprintf("%v", literalValue(key))
 	case *ssa.Global:
-        return fmt.Sprintf("%v[%v]", &fr.i.globals, key)
-    case ssa.Instruction:
-        return fmt.Sprintf("%v[%v]", &fr.env, hashInstr(fr, key)) 
+        return fr.i.gvars[key]
 	}
     //fmt.Fprintf(os.Stdout, "%v\n", reflect.TypeOf(key))
     //panic("Should never get here, boom")
-    return fmt.Sprintf("%v[%v]", &fr.env, key)
+    return fr.fvars[key] 
+}
+
+func (fr *frame) makeVar(key ssa.Value) string {
+    vcount := atomic.AddUint64(&fr.fcount, 1)
+    vname := fmt.Sprintf("%s_%d", fr.fprefix, vcount)
+    fr.fvars[key] = vname
+    return vname
+}
+
+func (fr *frame) aliasVar(newKey ssa.Value, oldKey ssa.Value) string {
+    fr.fvars[newKey] = fr.fvars[oldKey]
+    return fr.fvars[newKey]
 }
 
 func (fr *frame) rundefers() {
@@ -238,27 +256,29 @@ func send(fr *frame, instr *ssa.Send) {
 // record frame.  It returns a continuation value indicating where to
 // read the next instruction from.
 func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction, trace bool) continuation {
-    h := hashInstr(fr, instr)
+    //if trace {
+    //    fmt.Fprintf(i.writer, "%v    ", reflect.TypeOf(instr))
+    //}
 	switch instr := instr.(type) {
 	case *ssa.UnOp:
         if instr.Op == token.ARROW {
             var rside string
             fr.env[instr], rside = recv(fr, instr, fr.get(instr.X))
             if trace {
-                fmt.Fprintf(i.writer, "<<%v[%v] = %v(%v) [%v]>>\n", &fr.env, h, instr.Op, rside, fr.env[instr])
+                fmt.Fprintf(i.writer, "<<%v = %v(%v) [%v]>>\n", fr.makeVar(instr), instr.Op, rside, fr.env[instr])
             }
         } else {
             fr.env[instr] = unop(instr, fr.get(instr.X))
             if trace {
-                fmt.Fprintf(i.writer, "<<%v[%v] = %v(%v) [%v]>>\n", &fr.env, h, instr.Op, fr.String(instr.X), fr.env[instr])
+                fmt.Fprintf(i.writer, "<<%v = %v(%v) [%v]>>\n", fr.makeVar(instr), instr.Op, fr.String(instr.X), fr.env[instr])
             }
         }
 
 	case *ssa.BinOp:
 		fr.env[instr] = binop(instr.Op, fr.get(instr.X), fr.get(instr.Y))
         if trace {
-            fmt.Fprintf(i.writer, "<<%v[%v] = %v %v %v [%v]>>\n",
-                        &fr.env, h, fr.String(instr.X), instr.Op, fr.String(instr.Y), fr.env[instr])
+            fmt.Fprintf(i.writer, "<<%v = %v %v %v [%v]>>\n",
+                        fr.makeVar(instr), fr.String(instr.X), instr.Op, fr.String(instr.Y), fr.env[instr])
         }
 	case *ssa.Call:
         if trace {
@@ -279,7 +299,7 @@ func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction, trace bool) co
             fr.env[instr], rets = call(fr.i, fr, instr.Pos(), fn, args, argSrc, trace)
             //Exit
             if trace {
-                fmt.Fprintf(i.writer, "<<%v[%v] = %v [%v]>>\n", &fr.env, h, rets, fr.env[instr])
+                fmt.Fprintf(i.writer, "<<%v = %v [%v]>>\n", fr.makeVar(instr), rets, fr.env[instr])
             }
         }
 
@@ -290,36 +310,38 @@ func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction, trace bool) co
 		}
 		fr.env[instr] = x
         if trace {
-            fmt.Fprintf(i.writer, "<<%v[%v] = %v [%v]>>\n", &fr.env, h, instr, fr.env[instr])
+            fr.aliasVar(instr, instr.X)
+            //fmt.Fprintf(i.writer, "<<%v = %v [%v]>>\n", , instr, fr.env[instr])
         } 
 	case *ssa.ChangeType:
 		fr.env[instr] = fr.get(instr.X) // (can't fail)
         if trace {
-            fmt.Fprintf(i.writer, "<<%v[%v] = %v [%v]>>\n", &fr.env, h, instr, fr.env[instr])
+            fr.aliasVar(instr, instr.X)
         }
 
 	case *ssa.Convert:
 		fr.env[instr] = conv(instr.Type(), instr.X.Type(), fr.get(instr.X))
         if trace {
-            fmt.Fprintf(i.writer, "<<%v[%v] = %v [%v]>>\n", &fr.env, h, instr, fr.env[instr])
+            fr.aliasVar(instr, instr.X)
         }
 
 	case *ssa.MakeInterface:
 		fr.env[instr] = iface{t: instr.X.Type(), v: fr.get(instr.X)}
         if trace {
-            fmt.Fprintf(i.writer, "<<%v[%v] = %v [%v]>>\n", &fr.env, h, fr.String(instr.X), fr.env[instr])
+            fr.aliasVar(instr, instr.X)
+            //fmt.Fprintf(i.writer, "<<%v = %v [%v]>>\n", fr.makeVar(instr), fr.String(instr.X), fr.env[instr])
         }
 
 	case *ssa.Extract:
 		fr.env[instr] = fr.get(instr.Tuple).(tuple)[instr.Index]
         if trace {
-            fmt.Fprintf(i.writer, "<<%v[%v] = %v[%v] [%v]>>\n", &fr.env, h, fr.String(instr.Tuple), instr.Index, fr.env[instr])
+            fmt.Fprintf(i.writer, "<<%v = %v[%v] [%v]>>\n", fr.makeVar(instr), fr.String(instr.Tuple), instr.Index, fr.env[instr])
         }
 
 	case *ssa.Slice:
 		fr.env[instr] = slice(fr.get(instr.X), fr.get(instr.Low), fr.get(instr.High))
         if trace {
-            fmt.Fprintf(i.writer, "<<%v[%v] = %v [%v]>>\n", &fr.env, h, instr, fr.env[instr])
+            fmt.Fprintf(i.writer, "<<%v = %v [%v]>>\n", fr.makeVar(instr), fr.env[instr])
         }
 
 	case *ssa.Ret:
@@ -390,7 +412,7 @@ func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction, trace bool) co
 	case *ssa.MakeChan:
 		fr.env[instr] = make(chan value, asInt(fr.get(instr.Size)))
         if trace {
-            fmt.Printf("<<%v[%v] = %v %v>>\n", &fr.env, h, "make chan", instr.Type())
+            fmt.Printf("<<%v = %v %v>>\n", fr.makeVar(instr), "make chan", instr.Type())
         }
 
 	case *ssa.Alloc:
@@ -400,7 +422,7 @@ func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction, trace bool) co
 			addr = new(value)
 			fr.env[instr] = addr
             if trace {
-                fmt.Fprintf(i.writer, "<<%v[%v] = heapalloc(%v) [%v]>>\n", &fr.env, h, instr.Type(),fr.env[instr])
+                fmt.Fprintf(i.writer, "<<%v = heapalloc(%v) [%v]>>\n", fr.makeVar(instr), instr.Type(),fr.env[instr])
             }
 		} else {
 			// local
@@ -426,49 +448,49 @@ func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction, trace bool) co
 		}
 		fr.env[instr] = makeMap(instr.Type().Underlying().(*types.Map).Key(), reserve)
         if trace {
-            fmt.Fprintf (i.writer, "<<%v[%v] = makeMap>>\n", &fr.env, h)
+            fmt.Fprintf (i.writer, "<<%v = makeMap %v>>\n", fr.makeVar(instr), instr.Type().Underlying().(*types.Map).Key())
         }
 
 	case *ssa.Range:
 		fr.env[instr] = rangeIter(fr.get(instr.X), instr.X.Type())
         if trace {
-            fmt.Fprintf (i.writer, "<<%v[%v] = %v>>\n", &fr.env, &instr, instr)
+            fmt.Fprintf (i.writer, "<<%v = %v>>\n", fr.makeVar(instr), instr)
         }
 
 	case *ssa.Next:
 		fr.env[instr] = fr.get(instr.Iter).(iter).next()
         if trace {
-            fmt.Fprintf (i.writer, "<<%v[v] = %v>>\n", &fr.env, &instr, instr)
+            fmt.Fprintf (i.writer, "<<%v = %v>>\n", fr.makeVar(instr), instr)
         }
 
 	case *ssa.FieldAddr:
 		x := fr.get(instr.X)
 		fr.env[instr] = &(*x.(*value)).(structure)[instr.Field]
         name := instr.X.Type().Deref().Underlying().(*types.Struct).Field(instr.Field).Name()
-        if trace {
-            fmt.Fprintf(i.writer, "<<%v[%v] = &%v.%v>>\n", &fr.env, h, fr.String(instr.X), name)
+        if trace { // Maybe track alias
+            fmt.Fprintf(i.writer, "<<%v = &%v.%v>>\n", fr.makeVar(instr), fr.String(instr.X), name)
         }
 
 	case *ssa.Field:
 		fr.env[instr] = copyVal(fr.get(instr.X).(structure)[instr.Field])
         name := instr.X.Type().Deref().Underlying().(*types.Struct).Field(instr.Field).Name()
-        if trace {
-            fmt.Fprintf(i.writer, "<<%v[%v] = %v.%v>>\n", &fr.env, h, fr.String(instr.X), name)
+        if trace { 
+            fmt.Fprintf(i.writer, "<<%v = %v.%v>>\n", fr.makeVar(instr), fr.String(instr.X), name)
         }
 
 	case *ssa.IndexAddr:
 		x := fr.get(instr.X)
 		idx := fr.get(instr.Index)
-		switch x := x.(type) {
+		switch x := x.(type) {// Maybe track alias
 		case []value:
 			fr.env[instr] = &x[asInt(idx)]
             if trace {
-                fmt.Fprintf(i.writer, "<<%v[%v] = &%v[%v]>>\n", &fr.env, h, fr.String(instr.X), instr.Index)
+                fmt.Fprintf(i.writer, "<<%v = &%v[%v]>>\n", fr.makeVar(instr), fr.String(instr.X), instr.Index)
             }
 		case *value: // *array
 			fr.env[instr] = &(*x).(array)[asInt(idx)]
             if trace {
-                fmt.Fprintf(i.writer, "<<%v[%v] = &%v[%v]>>\n", &fr.env, h, fr.String(instr.X), instr.Index)
+                fmt.Fprintf(i.writer, "<<%v = &%v[%v]>>\n", fr.makeVar(instr), fr.String(instr.X), instr.Index)
             }
 		default:
 			panic(fmt.Sprintf("unexpected x type in IndexAddr: %T", x))
@@ -477,13 +499,13 @@ func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction, trace bool) co
 	case *ssa.Index:
 		fr.env[instr] = copyVal(fr.get(instr.X).(array)[asInt(fr.get(instr.Index))])
         if trace {
-            fmt.Fprintf(i.writer, "<<%v[%v] = %v[%v]>>\n", &fr.env, h, fr.String(instr.X), instr.Index)
+            fmt.Fprintf(i.writer, "<<%v = %v[%v]>>\n", fr.makeVar(instr), fr.String(instr.X), instr.Index)
         }
 
 	case *ssa.Lookup:
 		fr.env[instr] = lookup(instr, fr.get(instr.X), fr.get(instr.Index))
         if trace {
-            fmt.Fprintf(i.writer, "<<%v[%v] = %v[%v] [%v]>>\n", &fr.env, h, fr.String(instr.X), fr.String(instr.Index), fr.env[instr])
+            fmt.Fprintf(i.writer, "<<%v = %v[%v] [%v]>>\n", fr.makeVar(instr), fr.String(instr.X), fr.String(instr.Index), fr.env[instr])
         }
 
 	case *ssa.MapUpdate:
@@ -660,6 +682,7 @@ func callSSA(i *interpreter, caller *frame, callpos token.Pos, fn *ssa.Function,
     if caller != nil {
         ptype = caller.packetType
     }
+    fcount := atomic.AddUint64(&i.fcount, 1)
 	fr := &frame{
 		i:      i,
 		caller: caller, // currently unused; for unwinding.
@@ -669,19 +692,22 @@ func callSSA(i *interpreter, caller *frame, callpos token.Pos, fn *ssa.Function,
 		locals: make([]value, len(fn.Locals)),
         labels: make(map[ssa.Instruction] uint64, len(fn.Blocks[0].Instrs)),
         packetType: ptype,
+        fvars: make(map[ssa.Value] string),
+        fprefix: fmt.Sprintf("f%d", fcount),
+        fcount: 0,
 	}
 	for j, l := range fn.Locals {
 		fr.locals[j] = zero(l.Type().Deref())
 		fr.env[l] = &fr.locals[j]
-        fmt.Fprintf(i.writer, "<<%v[%v] = %v>>\n", &fr.env, l, fr.locals[j])
+        fmt.Fprintf(i.writer, "<<%v = %v>>\n", fr.makeVar(l), fr.locals[j])
 	}
 	for j, p := range fn.Params {
-        fmt.Fprintf(i.writer, "<<%v[%v] = %v [%v]>>\n", &fr.env, p, argSrc[j], args[j])
+        fmt.Fprintf(i.writer, "<<%v = %v [%v]>>\n", fr.makeVar(p), argSrc[j], args[j])
 		fr.env[p] = args[j]
 	}
 	for j, fv := range fn.FreeVars {
 		fr.env[fv] = env[j]
-        fmt.Fprintf(i.writer, "<<%v[%v] = %v>>\n", &fr.env, fv, env[j])
+        fmt.Fprintf(i.writer, "<<%v = %v>>\n", fr.makeVar(fv), env[j])
 	}
 	var instr ssa.Instruction
 
@@ -751,6 +777,11 @@ func Interpret(mainpkg *ssa.Package, mode Mode, filename string, args []string) 
 		globals: make(map[ssa.Value]*value),
 		mode:    mode,
         writer:  os.Stdout, 
+        gvars: make(map[ssa.Value] string),
+        gprefix: "g",
+        fcount: 0,
+        gcount: 0,
+        
 	}
 	initReflect(i)
 
@@ -761,6 +792,7 @@ func Interpret(mainpkg *ssa.Package, mode Mode, filename string, args []string) 
 			case *ssa.Global:
 				cell := zero(v.Type().Deref())
 				i.globals[v] = &cell
+                i.gvars[v] = fmt.Sprintf("%v_%d", i.gprefix, i.fcount)
 			}
 		}
 
