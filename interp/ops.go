@@ -756,8 +756,8 @@ func binop(op token.Token, x, y value) value {
 func unop(instr *ssa.UnOp, x value) value {
 	switch instr.Op {
 	case token.ARROW: // receive
-        z := recv(instr, x)
-		return z
+        panic("unop no longer handles receive")
+        return nil
 	case token.SUB:
 		switch x := x.(type) {
 		case int:

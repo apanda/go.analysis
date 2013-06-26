@@ -106,6 +106,7 @@ type frame struct {
 	panic            interface{}
     instrCount       uint64
     labels           map[ssa.Instruction] uint64
+    packetType       string
 }
 
 func (fr *frame) get(key ssa.Value) value {
@@ -198,7 +199,7 @@ func recvTraditional(instr *ssa.UnOp, x value) value {
 // recv is called by unop for channel receives. recv (currently) interposes to check if the channel is attempting to receive
 // a packet or some other type, and injects packets into the stream.
 // TODO: Better packet generation
-func recv(instr *ssa.UnOp, x value) value {
+func recv(fr *frame, instr *ssa.UnOp, x value) (value, string) {
     if (strings.HasSuffix(instr.X.Type().Underlying().(*types.Chan).Elem().String(), "github.com/apanda/learn.Packet")) {
         var v2 value
         switch instr.X.Type().Underlying().(*types.Chan).Elem().(type) {
@@ -212,9 +213,9 @@ func recv(instr *ssa.UnOp, x value) value {
         if instr.CommaOk {
             v2 = tuple{v2, true}
         }
-        return v2
+        return v2, "Packet"
     } else {
-        return recvTraditional(instr, x)
+        return recvTraditional(instr, x), fr.String(instr.X)
     }
 }
 
@@ -226,7 +227,7 @@ func sendTraditional(fr *frame, instr *ssa.Send) {
 // send is called by visitInstr to send a message. Here we make sure that if this happens to be a rule
 // the interpreter just consumes it. Perhaps we should print out the rule or something else.
 func send(fr *frame, instr *ssa.Send) {
-    if (strings.HasSuffix(instr.Chan.Type().Underlying().(*types.Chan).Elem().String(), "github.com/apanda/learn.Rule")) {
+    if fr.packetType != "" && strings.HasSuffix(instr.Chan.Type().Underlying().(*types.Chan).Elem().String(), fr.packetType) {
         // NOP, we already saw the construction of this rule
     } else {
         sendTraditional (fr, instr)
@@ -240,9 +241,17 @@ func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction, trace bool) co
     h := hashInstr(fr, instr)
 	switch instr := instr.(type) {
 	case *ssa.UnOp:
-		fr.env[instr] = unop(instr, fr.get(instr.X))
-        if trace {
-            fmt.Fprintf(i.writer, "<<%v[%v] = %v(%v) [%v]>>\n", &fr.env, h, instr.Op, fr.String(instr.X), fr.env[instr])
+        if instr.Op == token.ARROW {
+            var rside string
+            fr.env[instr], rside = recv(fr, instr, fr.get(instr.X))
+            if trace {
+                fmt.Fprintf(i.writer, "<<%v[%v] = %v(%v) [%v]>>\n", &fr.env, h, instr.Op, rside, fr.env[instr])
+            }
+        } else {
+            fr.env[instr] = unop(instr, fr.get(instr.X))
+            if trace {
+                fmt.Fprintf(i.writer, "<<%v[%v] = %v(%v) [%v]>>\n", &fr.env, h, instr.Op, fr.String(instr.X), fr.env[instr])
+            }
         }
 
 	case *ssa.BinOp:
@@ -256,13 +265,22 @@ func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction, trace bool) co
             fmt.Fprintf(i.writer, "enter %v\n", fr.String(instr.Call.Func))
         }
 		fn, args, argSrc := prepareCall(fr, &instr.Call)
-        //Enter
-        // Determine arguments
-        var rets []string
-        fr.env[instr], rets = call(fr.i, fr, instr.Pos(), fn, args, argSrc, trace)
-        //Exit
-        if trace {
-            fmt.Fprintf(i.writer, "<<%v[%v] = %v [%v]>>\n", &fr.env, h, rets, fr.env[instr])
+        fnAsFun, ok := fn.(*ssa.Function)
+        if ok && fnAsFun.FullName() == "github.com/apanda/constraints.Constraint" {
+            fmt.Fprintln(i.writer, "Found constraint code")
+        } else if ok && fnAsFun.FullName() == "github.com/apanda/constraints.PacketType" {
+            arg := fr.get(instr.Call.Args[0])
+            fmt.Fprintf(i.writer, "PacketType specified is %v\n", arg.(iface).t.Deref().String())
+            fr.packetType = arg.(iface).t.Deref().String()
+        } else {
+            //Enter
+            // Determine arguments
+            var rets []string
+            fr.env[instr], rets = call(fr.i, fr, instr.Pos(), fn, args, argSrc, trace)
+            //Exit
+            if trace {
+                fmt.Fprintf(i.writer, "<<%v[%v] = %v [%v]>>\n", &fr.env, h, rets, fr.env[instr])
+            }
         }
 
 	case *ssa.ChangeInterface:
@@ -638,6 +656,10 @@ func callSSA(i *interpreter, caller *frame, callpos token.Pos, fn *ssa.Function,
 			panic("no code for function: " + name)
 		}
 	}
+    var ptype string
+    if caller != nil {
+        ptype = caller.packetType
+    }
 	fr := &frame{
 		i:      i,
 		caller: caller, // currently unused; for unwinding.
@@ -646,6 +668,7 @@ func callSSA(i *interpreter, caller *frame, callpos token.Pos, fn *ssa.Function,
 		block:  fn.Blocks[0],
 		locals: make([]value, len(fn.Locals)),
         labels: make(map[ssa.Instruction] uint64, len(fn.Blocks[0].Instrs)),
+        packetType: ptype,
 	}
 	for j, l := range fn.Locals {
 		fr.locals[j] = zero(l.Type().Deref())
