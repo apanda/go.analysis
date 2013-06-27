@@ -95,6 +95,8 @@ type interpreter struct {
     fcount         uint64
     gcount         uint64
     gvars          map[ssa.Value] string
+    ptrs           map[ssa.Value] string
+    symbolic       map[string] string
 }
 
 type frame struct {
@@ -115,6 +117,8 @@ type frame struct {
     fprefix          string
     fvars            map[ssa.Value] string
     fcount           uint64
+    ptrs             map[ssa.Value] string
+    symbolic         map[string] string
 }
 
 func (fr *frame) get(key ssa.Value) value {
@@ -139,21 +143,31 @@ func (fr *frame) get(key ssa.Value) value {
 }
 
 func (fr *frame) String(key ssa.Value) string {
+    var v string
 	switch key := key.(type) {
 	case nil:
 		// Hack; simplifies handling of optional attributes
 		// such as ssa.Slice.{Low,High}.
 		return ""
 	case *ssa.Function, *ssa.Builtin:
-        return fmt.Sprintf("%v", key)
+        v = fmt.Sprintf("%v", key)
 	case *ssa.Literal:
-		return fmt.Sprintf("%v", literalValue(key))
+		v = fmt.Sprintf("%v", literalValue(key))
 	case *ssa.Global:
-        return fr.i.gvars[key]
+        v = fr.i.gvars[key]
+        if fr.i.symbolic[v] != "" {
+            v = fr.i.symbolic[v]
+        }
+        return v
+    default:
+        v = fr.fvars[key] 
 	}
+    if fr.symbolic[v] != "" {
+        v = fr.symbolic[v]
+    }
+    return v
     //fmt.Fprintf(os.Stdout, "%v\n", reflect.TypeOf(key))
     //panic("Should never get here, boom")
-    return fr.fvars[key] 
 }
 
 func (fr *frame) makeVar(key ssa.Value) string {
@@ -256,9 +270,6 @@ func send(fr *frame, instr *ssa.Send) {
 // record frame.  It returns a continuation value indicating where to
 // read the next instruction from.
 func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction, trace bool) continuation {
-    //if trace {
-    //    fmt.Fprintf(i.writer, "%v    ", reflect.TypeOf(instr))
-    //}
 	switch instr := instr.(type) {
 	case *ssa.UnOp:
         if instr.Op == token.ARROW {
@@ -270,15 +281,24 @@ func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction, trace bool) co
         } else {
             fr.env[instr] = unop(instr, fr.get(instr.X))
             if trace {
-                fmt.Fprintf(i.writer, "<<%v = %v(%v) [%v]>>\n", fr.makeVar(instr), instr.Op, fr.String(instr.X), fr.env[instr])
+                v := fr.makeVar(instr)
+                if instr.Op == token.MUL && fr.ptrs[instr.X] != "" {
+                        fmt.Fprintf(i.writer, "<<%v = %v [%v]>>\n", v, fr.ptrs[instr.X], fr.env[instr])
+                        fr.symbolic[v] = fr.ptrs[instr.X]
+                } else {
+                    fr.symbolic[v] = fmt.Sprintf("%v(%v)", instr.Op, fr.String(instr.X))
+                    fmt.Fprintf(i.writer, "<<%v = %v [%v]>>\n", v, fr.symbolic[v], fr.env[instr])
+                }
             }
         }
 
 	case *ssa.BinOp:
 		fr.env[instr] = binop(instr.Op, fr.get(instr.X), fr.get(instr.Y))
         if trace {
-            fmt.Fprintf(i.writer, "<<%v = %v %v %v [%v]>>\n",
-                        fr.makeVar(instr), fr.String(instr.X), instr.Op, fr.String(instr.Y), fr.env[instr])
+            v := fr.makeVar(instr)
+            fr.symbolic[v] = fmt.Sprintf("%v %v %v", fr.String(instr.X), instr.Op, fr.String(instr.Y))
+            fmt.Fprintf(i.writer, "<<%v = %v [%v]>>\n",
+                        v, fr.symbolic[v], fr.env[instr])
         }
 	case *ssa.Call:
         if trace {
@@ -299,7 +319,12 @@ func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction, trace bool) co
             fr.env[instr], rets = call(fr.i, fr, instr.Pos(), fn, args, argSrc, trace)
             //Exit
             if trace {
-                fmt.Fprintf(i.writer, "<<%v = %v [%v]>>\n", fr.makeVar(instr), rets, fr.env[instr])
+                v := fr.makeVar(instr)
+                fmt.Fprintf(i.writer, "<<%v = %v [%v]>>\n", v, rets, fr.env[instr])
+                fr.symbolic[v] = fmt.Sprintf("%v", rets)
+                for i, j := range rets {
+                    fr.symbolic[fmt.Sprintf("%v[%v]", v, i)] = j
+                }
             }
         }
 
@@ -335,7 +360,9 @@ func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction, trace bool) co
 	case *ssa.Extract:
 		fr.env[instr] = fr.get(instr.Tuple).(tuple)[instr.Index]
         if trace {
-            fmt.Fprintf(i.writer, "<<%v = %v[%v] [%v]>>\n", fr.makeVar(instr), fr.String(instr.Tuple), instr.Index, fr.env[instr])
+            v := fr.makeVar(instr)
+            fr.symbolic[v] = fmt.Sprintf("%v[%v]", fr.String(instr.Tuple), instr.Index) 
+            fmt.Fprintf(i.writer, "<<%v = %v[%v] [%v]>>\n", v, fr.String(instr.Tuple), instr.Index, fr.env[instr])
         }
 
 	case *ssa.Slice:
@@ -375,7 +402,20 @@ func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction, trace bool) co
 
 	case *ssa.Store:
         if trace {
-            fmt.Fprintf (i.writer, "<<*%v = %v [%v]>>\n", fr.String(instr.Addr), fr.String(instr.Val), fr.get(instr.Val)) 
+            iv := fr.String(instr.Val)
+            var ia string
+            if fr.ptrs[instr.Addr] != "" {
+                ia = fr.ptrs[instr.Addr]
+                fmt.Fprintf (i.writer, "<<%v = %v [%v]>>\n", ia, iv, fr.get(instr.Val)) 
+            } else {
+                ia = fmt.Sprintf("*fr.String(instr.Addr)")
+                fmt.Fprintf (i.writer, "<<%v = %v [%v]>>\n", ia, iv, fr.get(instr.Val)) 
+            }
+            if fr.symbolic[iv] != "" {
+                fr.symbolic[ia] = fr.symbolic[iv]
+            } else {
+                fr.symbolic[ia] = iv
+            }
         }
 		*fr.get(instr.Addr).(*value) = copyVal(fr.get(instr.Val))
 
@@ -412,7 +452,10 @@ func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction, trace bool) co
 	case *ssa.MakeChan:
 		fr.env[instr] = make(chan value, asInt(fr.get(instr.Size)))
         if trace {
-            fmt.Printf("<<%v = %v %v>>\n", fr.makeVar(instr), "make chan", instr.Type())
+            v := fr.makeVar(instr)
+            r := fmt.Sprintf("make chan %v", instr.Type())
+            fmt.Fprintf(i.writer, "<<%v = %v>>\n", v, r )
+            fr.symbolic[v] = r 
         }
 
 	case *ssa.Alloc:
@@ -422,7 +465,10 @@ func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction, trace bool) co
 			addr = new(value)
 			fr.env[instr] = addr
             if trace {
-                fmt.Fprintf(i.writer, "<<%v = heapalloc(%v) [%v]>>\n", fr.makeVar(instr), instr.Type(),fr.env[instr])
+                v :=  fr.makeVar(instr)
+                r := fmt.Sprintf("heapalloc(%v)", instr.Type())
+                fmt.Fprintf(i.writer, "<<%v = %v [%v]>>\n", v, r, fr.env[instr])
+                fr.symbolic[v] = v
             }
 		} else {
 			// local
@@ -448,13 +494,19 @@ func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction, trace bool) co
 		}
 		fr.env[instr] = makeMap(instr.Type().Underlying().(*types.Map).Key(), reserve)
         if trace {
-            fmt.Fprintf (i.writer, "<<%v = makeMap %v>>\n", fr.makeVar(instr), instr.Type().Underlying().(*types.Map).Key())
+            v := fr.makeVar(instr)
+            r := fmt.Sprintf("makeMap %v", instr.Type().Underlying().(*types.Map).Key())
+            fmt.Fprintf (i.writer, "<<%v = %v>>\n", v, r)
+            fr.symbolic[v] = v
         }
 
 	case *ssa.Range:
 		fr.env[instr] = rangeIter(fr.get(instr.X), instr.X.Type())
         if trace {
-            fmt.Fprintf (i.writer, "<<%v = %v>>\n", fr.makeVar(instr), instr)
+            v := fr.makeVar(instr)
+            r := fmt.Sprintf("%v", instr)
+            fmt.Fprintf (i.writer, "<<%v = %v>>\n", v, r)
+            fr.symbolic[v] = r
         }
 
 	case *ssa.Next:
@@ -468,6 +520,7 @@ func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction, trace bool) co
 		fr.env[instr] = &(*x.(*value)).(structure)[instr.Field]
         name := instr.X.Type().Deref().Underlying().(*types.Struct).Field(instr.Field).Name()
         if trace { // Maybe track alias
+            fr.ptrs[instr] = fmt.Sprintf("%v.%v", fr.String(instr.X), name)
             fmt.Fprintf(i.writer, "<<%v = &%v.%v>>\n", fr.makeVar(instr), fr.String(instr.X), name)
         }
 
@@ -485,11 +538,13 @@ func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction, trace bool) co
 		case []value:
 			fr.env[instr] = &x[asInt(idx)]
             if trace {
+                fr.ptrs[instr] = fmt.Sprintf("%v[%v]", fr.String(instr.X), instr.Index)
                 fmt.Fprintf(i.writer, "<<%v = &%v[%v]>>\n", fr.makeVar(instr), fr.String(instr.X), instr.Index)
             }
 		case *value: // *array
 			fr.env[instr] = &(*x).(array)[asInt(idx)]
             if trace {
+                fr.ptrs[instr] = fmt.Sprintf("%v[%v]", fr.String(instr.X), instr.Index)
                 fmt.Fprintf(i.writer, "<<%v = &%v[%v]>>\n", fr.makeVar(instr), fr.String(instr.X), instr.Index)
             }
 		default:
@@ -522,6 +577,7 @@ func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction, trace bool) co
 		}
         if trace {
             fmt.Fprintf (i.writer, "<<%v[%v] = %v [%v]>>\n", fr.String(instr.Map), fr.String(instr.Key), fr.String(instr.Value), v)
+            fr.symbolic[fmt.Sprintf("%v[%v]", fr.String(instr.Map), fr.String(instr.Key))] = fr.String(instr.Value)
         }
 
 	case *ssa.TypeAssert:
@@ -540,6 +596,12 @@ func visitInstr(i *interpreter, fr *frame, instr ssa.Instruction, trace bool) co
 		for i, pred := range instr.Block().Preds {
 			if fr.prevBlock == pred {
 				fr.env[instr] = fr.get(instr.Edges[i])
+                v := fr.makeVar(instr)
+                r := fr.String(instr.Edges[i])
+                if r != "<nil>" {
+                    fmt.Fprintf(fr.i.writer, "<<%v = %v>>\n", v, r)
+                    fr.symbolic[v] = r
+                }
 				break
 			}
 		}
@@ -693,6 +755,8 @@ func callSSA(i *interpreter, caller *frame, callpos token.Pos, fn *ssa.Function,
         labels: make(map[ssa.Instruction] uint64, len(fn.Blocks[0].Instrs)),
         packetType: ptype,
         fvars: make(map[ssa.Value] string),
+        ptrs: make(map[ssa.Value] string),
+        symbolic: make(map[string] string),
         fprefix: fmt.Sprintf("f%d", fcount),
         fcount: 0,
 	}
@@ -778,6 +842,8 @@ func Interpret(mainpkg *ssa.Package, mode Mode, filename string, args []string) 
 		mode:    mode,
         writer:  os.Stdout, 
         gvars: make(map[ssa.Value] string),
+        ptrs:  make(map[ssa.Value] string),
+        symbolic:  make(map[string] string),
         gprefix: "g",
         fcount: 0,
         gcount: 0,
